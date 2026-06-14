@@ -1,82 +1,116 @@
-// benchmark.cpp
-// Compares the throughput of four floating point comparison strategies:
-//   1. areEqual          (this library, ULP via integer reinterpretation)
-//   2. areEqualStrict     (this library, same but with a sign-bit check
-//                          to fix the denorm_min false-positive)
-//   3. areEqualRelative   (classic relative-epsilon, std::numeric_limits)
-//   4. fabs(a-b) < eps    (naive fixed absolute epsilon)
-//
-// Build (release mode is important for a fair comparison):
-//   g++ -O2 -std=c++17 -o benchmark benchmark.cpp
+// test_compare.cpp
+// Basic correctness tests for fast_compare.hpp
 
 #include "../include/fast_compare.hpp"
 #include <iostream>
 #include <iomanip>
-#include <chrono>
-#include <vector>
-#include <random>
-#include <cmath>
-#include <algorithm>
 #include <limits>
-
-template <typename T>
-bool areEqualRelative(T a, T b) noexcept {
-    if (a == b) return true;
-    const T diff = std::fabs(a - b);
-    return diff <= (std::numeric_limits<T>::epsilon() * std::max(std::fabs(a), std::fabs(b)));
-}
-
-template <typename T>
-bool areEqualNaiveEpsilon(T a, T b, T eps = static_cast<T>(1e-9)) noexcept {
-    return std::fabs(a - b) < eps;
-}
-
-template <typename Func>
-double time_it(const std::vector<double>& a, const std::vector<double>& b, Func f, int repeats)
-{
-    volatile bool sink = false; // prevent optimizing the loop away
-    auto start = std::chrono::high_resolution_clock::now();
-    for (int r = 0; r < repeats; ++r) {
-        for (size_t i = 0; i < a.size(); ++i) {
-            sink = f(a[i], b[i]);
-        }
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-    (void)sink;
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
+#include <cassert>
 
 int main()
 {
-    constexpr size_t N = 1'000'000;
-    constexpr int REPEATS = 50;
+    using namespace fastcmp;
+    int failed = 0;
 
-    std::mt19937_64 rng(42);
-    std::uniform_real_distribution<double> dist(-1e6, 1e6);
+    auto check = [&](bool cond, const char* name) {
+        std::cout << (cond ? "[PASS] " : "[FAIL] ") << name << "\n";
+        if (!cond) ++failed;
+    };
 
-    std::vector<double> a(N), b(N);
-    for (size_t i = 0; i < N; ++i) {
-        a[i] = dist(rng);
-        // b is "almost equal" to a — typical of comparing a computed
-        // result against a reference value
-        b[i] = a[i] + a[i] * std::numeric_limits<double>::epsilon();
-    }
+    // --- Basic equality ---
+    check(areEqual(1.0, 1.0), "1.0 == 1.0");
+    check(!areEqual(1.0, 2.0), "1.0 != 2.0");
 
-    double t_fast   = time_it(a, b, [](double x, double y) { return fastcmp::areEqual(x, y); }, REPEATS);
-    double t_strict = time_it(a, b, [](double x, double y) { return fastcmp::areEqualStrict(x, y); }, REPEATS);
-    double t_rel    = time_it(a, b, [](double x, double y) { return areEqualRelative(x, y); }, REPEATS);
-    double t_eps    = time_it(a, b, [](double x, double y) { return areEqualNaiveEpsilon(x, y); }, REPEATS);
+    // --- Classic 0.1 + 0.2 vs 0.3 (differ by 1 ULP) ---
+    double sum = 0.1 + 0.2;
+    double ref = 0.3;
+    check(areEqual(sum, ref), "0.1 + 0.2 ~= 0.3 (1 ULP)");
 
-    std::cout << std::fixed << std::setprecision(2);
-    std::cout << "N = " << N << " comparisons x " << REPEATS << " repeats\n\n";
-    std::cout << "areEqual (ULP, this lib):       " << t_fast   << " ms\n";
-    std::cout << "areEqualStrict (ULP + sign chk): " << t_strict << " ms\n";
-    std::cout << "areEqualRelative:               " << t_rel    << " ms\n";
-    std::cout << "fabs(a-b) < 1e-9:               " << t_eps    << " ms\n\n";
+    // --- Large magnitude ---
+    double big_sum = 1.0e300 + 2.0e300;
+    double big_ref = 3.0e300;
+    check(areEqual(big_sum, big_ref), "1e300 + 2e300 ~= 3e300");
 
-    std::cout << "Speedup of areEqual vs areEqualRelative: " << (t_rel / t_fast) << "x\n";
-    std::cout << "Speedup of areEqual vs naive epsilon:    " << (t_eps / t_fast) << "x\n";
-    std::cout << "Overhead of areEqualStrict vs areEqual:  " << (t_strict / t_fast) << "x\n";
+    // --- Small magnitude (subnormal) ---
+    double small_sum = 1.0e-311 + 2.0e-311;
+    double small_ref = 3.0e-311;
+    check(areEqual(small_sum, small_ref), "subnormal sum ~= ref");
 
-    return 0;
+    // --- float ---
+    float fa = 0.1f, fb = 0.2f, fref = 0.3f;
+    check(areEqual(fa + fb, fref), "float 0.1f + 0.2f ~= 0.3f");
+
+    // --- Negative numbers ---
+    check(areEqual(-1.0, -1.0), "-1.0 == -1.0");
+    check(!areEqual(-1.0, -2.0), "-1.0 != -2.0");
+    double neg_sum = -1.0 + 1e-16;
+    double neg_ref = -0.9999999999999999;
+    check(areEqual(neg_sum, neg_ref), "-1.0 + 1e-16 ~= -0.9999999999999999");
+
+    // --- areEqualSafe with NaN ---
+    double nan_val = std::numeric_limits<double>::quiet_NaN();
+    check(!areEqualSafe(nan_val, nan_val), "NaN != NaN (areEqualSafe)");
+    check(!areEqualSafe(nan_val, 1.0), "NaN != 1.0 (areEqualSafe)");
+
+    // --- Fixed 1-ULP threshold: numbers 3 ULP apart are NOT equal ---
+    // areEqual has a fixed threshold of 1 ULP, with no way to loosen it.
+    // A larger threshold would be an arbitrary epsilon by another name,
+    // and could declare numbers equal that differ by as much as that
+    // threshold allows.
+    double a = 1.0;
+    double b = std::nextafter(std::nextafter(std::nextafter(a, 2.0), 2.0), 2.0); // 3 ULP away
+    check(!areEqual(a, b), "1.0 vs 1.0+3ULP -> false (fixed 1-ULP threshold)");
+
+    // --- KNOWN LIMITATION: opposite-sign values near denorm_min() ---
+    // bits(+denorm_min) - bits(-denorm_min) overflows int64_t and wraps
+    // to INT64_MIN, which is <= 1, so areEqual incorrectly reports
+    // these two *different* numbers (opposite signs!) as equal.
+    // This is documented in the README as a known false positive.
+    double dmin =  std::numeric_limits<double>::denorm_min();
+    double ndmin = -std::numeric_limits<double>::denorm_min();
+    bool false_positive = areEqual(dmin, ndmin);
+    std::cout << (false_positive ? "[INFO] " : "[UNEXPECTED] ")
+              << "areEqual(+denorm_min, -denorm_min) = "
+              << (false_positive ? "true (known false positive, as documented)"
+                                  : "false (limitation no longer reproduces!)")
+              << "\n";
+
+    // --- areEqualStrict: fixes the denorm_min false positive ---
+    check(!areEqualStrict(dmin, ndmin), "areEqualStrict(+denorm_min, -denorm_min) -> false");
+
+    // --- areEqualStrict: +0.0 == -0.0 still holds ---
+    double pos_zero = +0.0;
+    double neg_zero = -0.0;
+    check(areEqualStrict(pos_zero, neg_zero), "areEqualStrict(+0.0, -0.0) -> true");
+
+    // --- areEqualStrict: agrees with areEqual on same-sign values ---
+    check(areEqualStrict(sum, ref) == areEqual(sum, ref),
+          "areEqualStrict agrees with areEqual on same-sign 0.1+0.2 vs 0.3");
+    check(areEqualStrict(big_sum, big_ref) == areEqual(big_sum, big_ref),
+          "areEqualStrict agrees with areEqual on same-sign 1e300 case");
+    check(areEqualStrict(neg_sum, neg_ref) == areEqual(neg_sum, neg_ref),
+          "areEqualStrict agrees with areEqual on negative-sign case");
+
+    // --- areEqualStrictSafe with NaN ---
+    check(!areEqualStrictSafe(nan_val, nan_val), "NaN != NaN (areEqualStrictSafe)");
+
+    // --- SCOPE NOTE: decimal inputs that collapse to the same double ---
+    // x1 and x2 are different decimal literals (they differ starting at
+    // the 9th significant digit), but in the subnormal range the gap
+    // between adjacent doubles (denorm_min ~ 4.94e-324) is large relative
+    // to the values themselves, so both round to the SAME double at
+    // compile time. areEqual correctly reports them as equal AS DOUBLES —
+    // but the distinction between the original decimal inputs is already
+    // lost before areEqual ever runs. See README "Scope" section.
+    double x1 = 1.234567890987650e-311;
+    double x2 = 1.23456789098787441868238613483e-311;
+    bool collapsed = areEqual(x1, x2);
+    std::cout << (collapsed ? "[INFO] " : "[UNEXPECTED] ")
+              << "areEqual(x1, x2) = "
+              << (collapsed ? "true (distinct decimal literals collapsed to the same double, as documented)"
+                             : "false (literals no longer collapse!)")
+              << "\n";
+
+    std::cout << "\n" << (failed == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << "\n";
+    return failed == 0 ? 0 : 1;
 }
