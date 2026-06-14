@@ -10,14 +10,13 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
-#include <type_traits>
 
 namespace fastcmp {
 
 namespace detail {
 
 template <typename Float, typename Int>
-inline bool ulp_equal(Float a, Float b, Int max_ulp) noexcept
+inline bool ulp_equal(Float a, Float b) noexcept
 {
     Int bits1, bits2;
     std::memcpy(&bits1, &a, sizeof(Float));
@@ -26,11 +25,11 @@ inline bool ulp_equal(Float a, Float b, Int max_ulp) noexcept
     Int diff = bits1 - bits2;
     if (diff < 0) diff = -diff;
 
-    return diff <= max_ulp;
+    return diff <= 1;
 }
 
 template <typename Float, typename Int>
-inline bool ulp_equal_strict(Float a, Float b, Int max_ulp) noexcept
+inline bool ulp_equal_strict(Float a, Float b) noexcept
 {
     Int bits1, bits2;
     std::memcpy(&bits1, &a, sizeof(Float));
@@ -50,7 +49,7 @@ inline bool ulp_equal_strict(Float a, Float b, Int max_ulp) noexcept
     Int diff = bits1 - bits2;
     if (diff < 0) diff = -diff;
 
-    return diff <= max_ulp;
+    return diff <= 1;
 }
 
 } // namespace detail
@@ -59,8 +58,17 @@ inline bool ulp_equal_strict(Float a, Float b, Int max_ulp) noexcept
 // areEqual
 //
 // Compares two floating point numbers by reinterpreting their IEEE 754
-// bit patterns as signed integers and checking how many representable
-// values lie between them (ULP distance).
+// bit patterns as signed integers and checking whether they are
+// bit-identical or adjacent representable values (ULP distance <= 1).
+//
+// The threshold of 1 ULP is fixed and not configurable. It is the only
+// physically-motivated choice: IEEE 754 guarantees each elementary
+// operation (+, -, *, /, sqrt) is correctly rounded to within 0.5 ULP, so
+// two results differing by at most 1 ULP represent the same mathematical
+// value up to rounding. Any larger threshold (2, 4, ...) is an arbitrary
+// epsilon in different units, with exactly the same problem this library
+// is meant to avoid: it can declare numbers equal that are, in fact, the
+// most they could possibly differ given that threshold.
 //
 // PRECONDITIONS:
 //   - Neither `a` nor `b` is NaN.
@@ -71,21 +79,17 @@ inline bool ulp_equal_strict(Float a, Float b, Int max_ulp) noexcept
 //     wraps to INT64_MIN, and areEqual incorrectly reports the two
 //     numbers as equal (a false positive). This is an exceedingly narrow
 //     edge case that essentially never occurs in practical computations.
-//
-// max_ulp = 1 is the natural, physically-motivated threshold: IEEE 754
-// guarantees each elementary operation (+, -, *, /, sqrt) is correctly
-// rounded to within 0.5 ULP, so two results that differ by at most 1 ULP
-// represent the same mathematical value up to rounding.
+//     Use areEqualStrict if this matters for your application.
 // ---------------------------------------------------------------------
 
-inline bool areEqual(double a, double b, int64_t max_ulp = 1) noexcept
+inline bool areEqual(double a, double b) noexcept
 {
-    return detail::ulp_equal<double, int64_t>(a, b, max_ulp);
+    return detail::ulp_equal<double, int64_t>(a, b);
 }
 
-inline bool areEqual(float a, float b, int32_t max_ulp = 1) noexcept
+inline bool areEqual(float a, float b) noexcept
 {
-    return detail::ulp_equal<float, int32_t>(a, b, max_ulp);
+    return detail::ulp_equal<float, int32_t>(a, b);
 }
 
 // ---------------------------------------------------------------------
@@ -96,16 +100,16 @@ inline bool areEqual(float a, float b, int32_t max_ulp = 1) noexcept
 // NaN != NaN). Slightly slower due to the isnan() checks.
 // ---------------------------------------------------------------------
 
-inline bool areEqualSafe(double a, double b, int64_t max_ulp = 1) noexcept
+inline bool areEqualSafe(double a, double b) noexcept
 {
     if (std::isnan(a) || std::isnan(b)) return false;
-    return areEqual(a, b, max_ulp);
+    return areEqual(a, b);
 }
 
-inline bool areEqualSafe(float a, float b, int32_t max_ulp = 1) noexcept
+inline bool areEqualSafe(float a, float b) noexcept
 {
     if (std::isnan(a) || std::isnan(b)) return false;
-    return areEqual(a, b, max_ulp);
+    return areEqual(a, b);
 }
 
 // ---------------------------------------------------------------------
@@ -125,26 +129,26 @@ inline bool areEqualSafe(float a, float b, int32_t max_ulp = 1) noexcept
 // PRECONDITION: neither `a` nor `b` is NaN (same as areEqual).
 // ---------------------------------------------------------------------
 
-inline bool areEqualStrict(double a, double b, int64_t max_ulp = 1) noexcept
+inline bool areEqualStrict(double a, double b) noexcept
 {
-    return detail::ulp_equal_strict<double, int64_t>(a, b, max_ulp);
+    return detail::ulp_equal_strict<double, int64_t>(a, b);
 }
 
-inline bool areEqualStrict(float a, float b, int32_t max_ulp = 1) noexcept
+inline bool areEqualStrict(float a, float b) noexcept
 {
-    return detail::ulp_equal_strict<float, int32_t>(a, b, max_ulp);
+    return detail::ulp_equal_strict<float, int32_t>(a, b);
 }
 
-inline bool areEqualStrictSafe(double a, double b, int64_t max_ulp = 1) noexcept
+inline bool areEqualStrictSafe(double a, double b) noexcept
 {
     if (std::isnan(a) || std::isnan(b)) return false;
-    return areEqualStrict(a, b, max_ulp);
+    return areEqualStrict(a, b);
 }
 
-inline bool areEqualStrictSafe(float a, float b, int32_t max_ulp = 1) noexcept
+inline bool areEqualStrictSafe(float a, float b) noexcept
 {
     if (std::isnan(a) || std::isnan(b)) return false;
-    return areEqualStrict(a, b, max_ulp);
+    return areEqualStrict(a, b);
 }
 
 } // namespace fastcmp
