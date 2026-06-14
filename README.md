@@ -27,6 +27,11 @@ This gives a comparison that is:
   representation already encodes the exponent.
 - **Simple**: two `memcpy`s, a subtraction, and a comparison.
 
+> **Note on scope**: `areEqual` compares `double`/`float` *bit patterns* —
+> i.e. the values *after* decimal-to-binary rounding has already happened.
+> See [Scope: what "equal" means here](#scope-what-equal-means-here) for an
+> important caveat about subnormal numbers.
+
 ```cpp
 bool areEqual(double a, double b, int64_t max_ulp = 1) noexcept
 {
@@ -149,6 +154,47 @@ NaN and infinities are handled correctly by `areEqualSafe`. `areEqual` itself
 assumes non-NaN input (this is the documented precondition, matching the
 common pattern of checking for NaN once, upstream, before a series of
 comparisons).
+
+## Scope: what "equal" means here
+
+`areEqual` answers a precise question: **are these two `double` (or `float`)
+values bit-identical, or adjacent representable values?** It does *not* — and
+cannot — answer a different question that is easy to conflate with it: *are
+the decimal numbers I wrote in my source code the same?*
+
+Every decimal literal in a C++ program is rounded to the nearest
+representable `double` at compile time (the "Level 1 → Level 2" conversion
+in IEEE 754's own terminology). For most numbers this rounding is invisible.
+But in the subnormal range, representable `double` values become extremely
+sparse — the gap between adjacent subnormals (`denorm_min() ≈ 4.94e-324`) is
+enormous *relative to* the numbers themselves. Two decimal literals that
+differ by many significant digits can land on **the same** `double`:
+
+```cpp
+double x1 = 1.234567890987650e-311;
+double x2 = 1.23456789098787441868238613483e-311;
+
+// x1 and x2 differ starting at the 9th significant digit —
+// a relative difference of roughly 1e-15.
+//
+// But both round to the SAME double:
+//   bits(x1) == bits(x2)
+//   areEqual(x1, x2) == true
+```
+
+This is not a bug in `areEqual`, and not the same issue as the
+[denorm_min false positive](#known-limitation) above (that one is about a
+sign-crossing integer overflow; this one is about decimal-to-binary rounding
+that happens *before* `areEqual` ever sees the values). It is a fundamental
+property of `double` as a storage format: in the subnormal region, the
+decimal-to-binary rounding step can be lossy enough to map distinguishable
+decimal inputs onto an identical bit pattern, and no comparison performed
+*after* that rounding — `areEqual`, `areEqualRelative`, ULP-based or
+epsilon-based — can recover the information that was already lost.
+
+If your application's correctness depends on distinguishing decimal inputs
+at that scale, the comparison needs to happen on the decimal values
+themselves, before they are converted to `double`.
 
 ## License
 
