@@ -25,7 +25,6 @@ int main()
     double sum = 0.1 + 0.2;
     double ref = 0.3;
     check(areEqual(sum, ref), "0.1 + 0.2 ~= 0.3 (1 ULP)");
-    check(!areEqual(sum, ref, 0LL), "0.1 + 0.2 != 0.3 (0 ULP, exact)");
 
     // --- Large magnitude ---
     double big_sum = 1.0e300 + 2.0e300;
@@ -53,15 +52,18 @@ int main()
     check(!areEqualSafe(nan_val, nan_val), "NaN != NaN (areEqualSafe)");
     check(!areEqualSafe(nan_val, 1.0), "NaN != 1.0 (areEqualSafe)");
 
-    // --- max_ulp customization ---
+    // --- Fixed 1-ULP threshold: numbers 3 ULP apart are NOT equal ---
+    // areEqual has a fixed threshold of 1 ULP, with no way to loosen it.
+    // A larger threshold would be an arbitrary epsilon by another name,
+    // and could declare numbers equal that differ by as much as that
+    // threshold allows.
     double a = 1.0;
     double b = std::nextafter(std::nextafter(std::nextafter(a, 2.0), 2.0), 2.0); // 3 ULP away
-    check(!areEqual(a, b, 1LL), "1.0 vs 1.0+3ULP, max_ulp=1 -> false");
-    check(areEqual(a, b, 4LL), "1.0 vs 1.0+3ULP, max_ulp=4 -> true");
+    check(!areEqual(a, b), "1.0 vs 1.0+3ULP -> false (fixed 1-ULP threshold)");
 
     // --- KNOWN LIMITATION: opposite-sign values near denorm_min() ---
     // bits(+denorm_min) - bits(-denorm_min) overflows int64_t and wraps
-    // to INT64_MIN, which is <= max_ulp, so areEqual incorrectly reports
+    // to INT64_MIN, which is <= 1, so areEqual incorrectly reports
     // these two *different* numbers (opposite signs!) as equal.
     // This is documented in the README as a known false positive.
     double dmin =  std::numeric_limits<double>::denorm_min();
