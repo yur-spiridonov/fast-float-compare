@@ -27,13 +27,23 @@ This gives a comparison that is:
   representation already encodes the exponent.
 - **Simple**: two `memcpy`s, a subtraction, and a comparison.
 
+The threshold of **1 ULP is fixed and not configurable**. This is
+deliberate: a larger threshold (2, 4, ...) would just be an arbitrary
+epsilon expressed in different units, with the same problem this library is
+meant to avoid. For example, with a threshold of 4 ULP, two numbers that are
+genuinely 4 ULP apart — the maximum the threshold allows — would be reported
+as equal, even though they are the most different two numbers can be while
+still passing. Fixing the threshold at 1 keeps the guarantee tight: "equal"
+means "the same value up to a single correct rounding step", not "within
+some chosen tolerance".
+
 > **Note on scope**: `areEqual` compares `double`/`float` *bit patterns* —
 > i.e. the values *after* decimal-to-binary rounding has already happened.
 > See [Scope: what "equal" means here](#scope-what-equal-means-here) for an
 > important caveat about subnormal numbers.
 
 ```cpp
-bool areEqual(double a, double b, int64_t max_ulp = 1) noexcept
+bool areEqual(double a, double b) noexcept
 {
     int64_t bits1, bits2;
     std::memcpy(&bits1, &a, sizeof(double));
@@ -42,7 +52,7 @@ bool areEqual(double a, double b, int64_t max_ulp = 1) noexcept
     int64_t diff = bits1 - bits2;
     if (diff < 0) diff = -diff;
 
-    return diff <= max_ulp;
+    return diff <= 1;
 }
 ```
 
@@ -56,17 +66,17 @@ Header-only — just copy `include/fast_compare.hpp` into your project.
 double sum = 0.1 + 0.2;
 double ref = 0.3;
 
-fastcmp::areEqual(sum, ref);              // true (1 ULP apart, default max_ulp=1)
-fastcmp::areEqual(sum, ref, int64_t{0});  // false (not bit-identical)
+fastcmp::areEqual(sum, ref);              // true (1 ULP apart — adjacent representable values)
 fastcmp::areEqualSafe(sum, ref);          // true, also checks for NaN
 ```
 
 Two entry points are provided:
 
-- `areEqual(a, b, max_ulp = 1)` — fastest path. **Precondition: neither
-  argument is NaN.**
-- `areEqualSafe(a, b, max_ulp = 1)` — adds `isnan` checks (NaN != NaN, per
-  IEEE 754).
+- `areEqual(a, b)` — fastest path. **Precondition: neither argument is
+  NaN.** Returns `true` iff `a` and `b` are bit-identical or adjacent
+  representable values (ULP distance ≤ 1). This threshold is fixed and not
+  configurable — see [The idea](#the-idea) for why.
+- `areEqualSafe(a, b)` — adds `isnan` checks (NaN != NaN, per IEEE 754).
 
 ### areEqualStrict — fixing the denorm_min false positive
 
@@ -111,21 +121,22 @@ differing by 1 ULP, `-O2`):
 | Method                            | Relative speed |
 |------------------------------------|----------------|
 | `areEqual` (this library)          | **1.0x**       |
+| `areEqualRelative` (classic)       | ~0.65–0.7x     |
 | `areEqualStrict` (this library)    | ~0.65–0.7x     |
-| `areEqualRelative` (classic)       | ~0.5–0.55x     |
 | `fabs(a-b) < 1e-9` (naive eps)      | ~1.1–1.2x      |
 
-`areEqual` is consistently **1.8–1.9x faster than `areEqualRelative`**.
+`areEqual` is consistently **1.4–1.55x faster than `areEqualRelative`**.
 `areEqualStrict` adds a sign-bit check to eliminate the
-[denorm_min edge case](#known-limitation) below, costing roughly 1.45–1.5x
-over `areEqual` — but it is still **~1.25–1.3x faster than
-`areEqualRelative`** while matching its behavior in all cases, including
-opposite-sign and `+0.0`/`-0.0` comparisons.
+[denorm_min edge case](#known-limitation) below; on this workload its cost
+is roughly comparable to `areEqualRelative` — sometimes a bit faster,
+sometimes a bit slower, run-to-run. If the denorm_min edge case matters to
+you, `areEqualStrict` gives you `areEqualRelative`-equivalent speed while
+also being correct for `+0.0`/`-0.0` and opposite-sign comparisons.
 
-Compared to a naive fixed-epsilon check, `areEqual` and `areEqualStrict` are
-in the same ballpark in raw speed — but the naive check has no
-scale-awareness and silently breaks for very large or very small magnitudes,
-whereas the ULP-based threshold has the same meaning at every scale.
+Compared to a naive fixed-epsilon check, `areEqual` is in the same ballpark
+in raw speed — but the naive check has no scale-awareness and silently
+breaks for very large or very small magnitudes, whereas the ULP-based
+threshold has the same meaning at every scale.
 
 Run the benchmark yourself:
 
@@ -141,14 +152,14 @@ The signed-integer subtraction can overflow when `a` and `b` have
 magnitude** (`std::numeric_limits<T>::denorm_min()`, i.e. around `±5e-324`
 for `double`). In that case `bits(a) - bits(b)` exceeds `INT64_MAX` by
 exactly 1, wraps around to `INT64_MIN`, and the comparison
-`diff <= max_ulp` then evaluates to `true` — i.e. **`areEqual` reports two
+`diff <= 1` then evaluates to `true` — i.e. **`areEqual` reports two
 numbers of opposite sign as equal**, a false positive.
 
 This is an exceedingly narrow edge case (it only affects values whose
 magnitude is within one or two ULPs of `denorm_min()`) that does not arise
 in ordinary numerical computation. `areEqual` does not special-case it; if
-your application may produce values in that exact regime, validate
-separately.
+your application may produce values in that exact regime, use
+`areEqualStrict` instead.
 
 NaN and infinities are handled correctly by `areEqualSafe`. `areEqual` itself
 assumes non-NaN input (this is the documented precondition, matching the
