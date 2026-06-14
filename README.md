@@ -1,125 +1,150 @@
-# fast-float-compare
+// fast_compare.hpp
+// A fast, branchless-friendly alternative to epsilon-based floating point
+// equality comparison, based on the ordered-integer property of IEEE 754.
+//
+// SPDX-License-Identifier: MIT
+// Author: Iouri Spiridonov
 
-A header-only, branchless-friendly alternative to epsilon-based floating
-point equality comparison for C++, based on the **ordered-integer property**
-of the IEEE 754 bit layout.
+#pragma once
 
-## The idea
+#include <cstdint>
+#include <cstring>
+#include <cmath>
+#include <type_traits>
 
-In IEEE 754, a `double` or `float` is laid out as `[sign | exponent | mantissa]`,
-with the exponent placed *above* the mantissa. For positive numbers, this
-means that if you reinterpret the 64 (or 32) bits of a float as a signed
-integer, **larger floats map to larger integers** — the bit pattern is
-order-preserving.
+namespace fastcmp {
 
-A direct consequence: two floating point numbers that differ by exactly
-**1 unit in the last place (ULP)** — i.e. they are *adjacent representable
-values* — have integer representations that differ by exactly **1**.
+namespace detail {
 
-This gives a comparison that is:
-
-- **Physically motivated**: IEEE 754 guarantees each elementary operation
-  (`+`, `-`, `*`, `/`, `sqrt`) is correctly rounded to within 0.5 ULP. Two
-  results differing by ≤ 1 ULP represent the same mathematical value up to
-  rounding — there is no arbitrary threshold to tune.
-- **Scale-invariant by construction**: unlike `fabs(a-b) < eps`, there is no
-  separate epsilon to choose for different magnitudes — the integer
-  representation already encodes the exponent.
-- **Simple**: two `memcpy`s, a subtraction, and a comparison.
-
-```cpp
-bool areEqual(double a, double b, int64_t max_ulp = 1) noexcept
+template <typename Float, typename Int>
+inline bool ulp_equal(Float a, Float b, Int max_ulp) noexcept
 {
-    int64_t bits1, bits2;
-    std::memcpy(&bits1, &a, sizeof(double));
-    std::memcpy(&bits2, &b, sizeof(double));
+    Int bits1, bits2;
+    std::memcpy(&bits1, &a, sizeof(Float));
+    std::memcpy(&bits2, &b, sizeof(Float));
 
-    int64_t diff = bits1 - bits2;
+    Int diff = bits1 - bits2;
     if (diff < 0) diff = -diff;
 
     return diff <= max_ulp;
 }
-```
 
-## Usage
+template <typename Float, typename Int>
+inline bool ulp_equal_strict(Float a, Float b, Int max_ulp) noexcept
+{
+    Int bits1, bits2;
+    std::memcpy(&bits1, &a, sizeof(Float));
+    std::memcpy(&bits2, &b, sizeof(Float));
 
-Header-only — just copy `include/fast_compare.hpp` into your project.
+    // Sign bit is the top bit: negative when interpreted as signed Int.
+    bool neg1 = bits1 < 0;
+    bool neg2 = bits2 < 0;
 
-```cpp
-#include "fast_compare.hpp"
+    if (neg1 != neg2)
+    {
+        // Different signs: equal only for +0.0 == -0.0 (both magnitudes
+        // are 0). Avoids the int overflow that ulp_equal can hit here.
+        return (a == 0) && (b == 0);
+    }
 
-double sum = 0.1 + 0.2;
-double ref = 0.3;
+    Int diff = bits1 - bits2;
+    if (diff < 0) diff = -diff;
 
-fastcmp::areEqual(sum, ref);              // true (1 ULP apart, default max_ulp=1)
-fastcmp::areEqual(sum, ref, int64_t{0});  // false (not bit-identical)
-fastcmp::areEqualSafe(sum, ref);          // true, also checks for NaN
-```
+    return diff <= max_ulp;
+}
 
-Two entry points are provided:
+} // namespace detail
 
-- `areEqual(a, b, max_ulp = 1)` — fastest path. **Precondition: neither
-  argument is NaN.**
-- `areEqualSafe(a, b, max_ulp = 1)` — adds `isnan` checks (NaN != NaN, per
-  IEEE 754).
+// ---------------------------------------------------------------------
+// areEqual
+//
+// Compares two floating point numbers by reinterpreting their IEEE 754
+// bit patterns as signed integers and checking how many representable
+// values lie between them (ULP distance).
+//
+// PRECONDITIONS:
+//   - Neither `a` nor `b` is NaN.
+//   - This function is NOT defined to be reliable when `a` and `b` have
+//     opposite signs and both lie extremely close to the smallest subnormal
+//     magnitude (`std::numeric_limits<T>::denorm_min()`, i.e. around
+//     ±5e-324 for double). In that case bits(a) - bits(b) overflows,
+//     wraps to INT64_MIN, and areEqual incorrectly reports the two
+//     numbers as equal (a false positive). This is an exceedingly narrow
+//     edge case that essentially never occurs in practical computations.
+//
+// max_ulp = 1 is the natural, physically-motivated threshold: IEEE 754
+// guarantees each elementary operation (+, -, *, /, sqrt) is correctly
+// rounded to within 0.5 ULP, so two results that differ by at most 1 ULP
+// represent the same mathematical value up to rounding.
+// ---------------------------------------------------------------------
 
-## Correctness
+inline bool areEqual(double a, double b, int64_t max_ulp = 1) noexcept
+{
+    return detail::ulp_equal<double, int64_t>(a, b, max_ulp);
+}
 
-Verified against `areEqualRelative` (the standard
-`fabs(a-b) <= epsilon * max(|a|,|b|)` approach) across:
+inline bool areEqual(float a, float b, int32_t max_ulp = 1) noexcept
+{
+    return detail::ulp_equal<float, int32_t>(a, b, max_ulp);
+}
 
-- Numbers of vastly different magnitude (`1e-311` to `1e300`)
-- Positive and negative operands
-- Subnormal numbers
-- `float` and `double`
-- The classic `0.1 + 0.2 != 0.3` case
+// ---------------------------------------------------------------------
+// areEqualSafe
+//
+// Same as areEqual, but additionally checks for NaN inputs and returns
+// false if either argument is NaN (matching IEEE 754 semantics, where
+// NaN != NaN). Slightly slower due to the isnan() checks.
+// ---------------------------------------------------------------------
 
-See [`tests/test_compare.cpp`](tests/test_compare.cpp).
+inline bool areEqualSafe(double a, double b, int64_t max_ulp = 1) noexcept
+{
+    if (std::isnan(a) || std::isnan(b)) return false;
+    return areEqual(a, b, max_ulp);
+}
 
-## Performance
+inline bool areEqualSafe(float a, float b, int32_t max_ulp = 1) noexcept
+{
+    if (std::isnan(a) || std::isnan(b)) return false;
+    return areEqual(a, b, max_ulp);
+}
 
-On a representative workload (1M random double comparisons, results
-differing by 1 ULP, `-O2`):
+// ---------------------------------------------------------------------
+// areEqualStrict
+//
+// A modified version of areEqual that first compares the sign bits of
+// `a` and `b`. If the signs differ, the numbers are equal only if both
+// are zero (so +0.0 == -0.0 still holds), otherwise they are unequal.
+// This avoids the integer-overflow false positive documented for
+// areEqual (opposite-sign values near denorm_min()).
+//
+// This costs one extra branch and is the recommended choice whenever the
+// inputs may be of either sign and the denorm_min() edge case matters to
+// you. areEqual remains available for callers who know their inputs are
+// same-signed (or non-negative) and want the absolute minimum overhead.
+//
+// PRECONDITION: neither `a` nor `b` is NaN (same as areEqual).
+// ---------------------------------------------------------------------
 
-| Method                          | Relative speed |
-|----------------------------------|----------------|
-| `areEqual` (this library)        | **1.0x**       |
-| `areEqualRelative` (classic)     | ~0.6–0.7x      |
-| `fabs(a-b) < 1e-9` (naive eps)    | ~0.9–1.0x      |
+inline bool areEqualStrict(double a, double b, int64_t max_ulp = 1) noexcept
+{
+    return detail::ulp_equal_strict<double, int64_t>(a, b, max_ulp);
+}
 
-`areEqual` is consistently **1.4–1.6x faster than `areEqualRelative`**, while
-giving identical results and avoiding the choice of an arbitrary epsilon.
-Compared to a naive fixed-epsilon check it is roughly on par in raw speed —
-but the naive check has no scale-awareness and silently breaks for very
-large or very small magnitudes, whereas `areEqual`'s threshold (in ULPs) has
-the same meaning at every scale.
+inline bool areEqualStrict(float a, float b, int32_t max_ulp = 1) noexcept
+{
+    return detail::ulp_equal_strict<float, int32_t>(a, b, max_ulp);
+}
 
-Run the benchmark yourself:
+inline bool areEqualStrictSafe(double a, double b, int64_t max_ulp = 1) noexcept
+{
+    if (std::isnan(a) || std::isnan(b)) return false;
+    return areEqualStrict(a, b, max_ulp);
+}
 
-```bash
-g++ -O2 -std=c++17 -o benchmark benchmark/benchmark.cpp
-./benchmark
-```
+inline bool areEqualStrictSafe(float a, float b, int32_t max_ulp = 1) noexcept
+{
+    if (std::isnan(a) || std::isnan(b)) return false;
+    return areEqualStrict(a, b, max_ulp);
+}
 
-## Known limitation
-
-The signed-integer reinterpretation can in principle overflow when `a` and
-`b` have **opposite signs and both lie extremely close to the smallest
-subnormal magnitude** (`std::numeric_limits<T>::denorm_min()`, i.e. around
-`5e-324` for `double`). This is an exceedingly narrow edge case that does
-not arise in ordinary numerical computation. `areEqual` does not special-case
-it; if your application may produce values in that exact regime, validate
-separately.
-
-NaN and infinities are handled correctly by `areEqualSafe`. `areEqual` itself
-assumes non-NaN input (this is the documented precondition, matching the
-common pattern of checking for NaN once, upstream, before a series of
-comparisons).
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-## Author
-
-Iouri Spiridonov
+} // namespace fastcmp
