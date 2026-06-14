@@ -92,6 +92,23 @@ int main()
     // --- areEqualStrictSafe with NaN ---
     check(!areEqualStrictSafe(nan_val, nan_val), "NaN != NaN (areEqualStrictSafe)");
 
+    // --- SCOPE NOTE: decimal inputs that collapse to the same double ---
+    // x1 and x2 are different decimal literals (they differ starting at
+    // the 9th significant digit), but in the subnormal range the gap
+    // between adjacent doubles (denorm_min ~ 4.94e-324) is large relative
+    // to the values themselves, so both round to the SAME double at
+    // compile time. areEqual correctly reports them as equal AS DOUBLES —
+    // but the distinction between the original decimal inputs is already
+    // lost before areEqual ever runs. See README "Scope" section.
+    double x1 = 1.234567890987650e-311;
+    double x2 = 1.23456789098787441868238613483e-311;
+    bool collapsed = areEqual(x1, x2);
+    std::cout << (collapsed ? "[INFO] " : "[UNEXPECTED] ")
+              << "areEqual(x1, x2) = "
+              << (collapsed ? "true (distinct decimal literals collapsed to the same double, as documented)"
+                             : "false (literals no longer collapse!)")
+              << "\n";
+
     std::cout << "\n" << (failed == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << "\n";
     return failed == 0 ? 0 : 1;
 }
