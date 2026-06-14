@@ -1,8 +1,10 @@
 // benchmark.cpp
-// Compares the throughput of three floating point comparison strategies:
+// Compares the throughput of four floating point comparison strategies:
 //   1. areEqual          (this library, ULP via integer reinterpretation)
-//   2. areEqualRelative   (classic relative-epsilon, std::numeric_limits)
-//   3. fabs(a-b) < eps    (naive fixed absolute epsilon)
+//   2. areEqualStrict     (this library, same but with a sign-bit check
+//                          to fix the denorm_min false-positive)
+//   3. areEqualRelative   (classic relative-epsilon, std::numeric_limits)
+//   4. fabs(a-b) < eps    (naive fixed absolute epsilon)
 //
 // Build (release mode is important for a fair comparison):
 //   g++ -O2 -std=c++17 -o benchmark benchmark.cpp
@@ -60,18 +62,21 @@ int main()
         b[i] = a[i] + a[i] * std::numeric_limits<double>::epsilon();
     }
 
-    double t_fast = time_it(a, b, [](double x, double y) { return fastcmp::areEqual(x, y); }, REPEATS);
-    double t_rel  = time_it(a, b, [](double x, double y) { return areEqualRelative(x, y); }, REPEATS);
-    double t_eps  = time_it(a, b, [](double x, double y) { return areEqualNaiveEpsilon(x, y); }, REPEATS);
+    double t_fast   = time_it(a, b, [](double x, double y) { return fastcmp::areEqual(x, y); }, REPEATS);
+    double t_strict = time_it(a, b, [](double x, double y) { return fastcmp::areEqualStrict(x, y); }, REPEATS);
+    double t_rel    = time_it(a, b, [](double x, double y) { return areEqualRelative(x, y); }, REPEATS);
+    double t_eps    = time_it(a, b, [](double x, double y) { return areEqualNaiveEpsilon(x, y); }, REPEATS);
 
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "N = " << N << " comparisons x " << REPEATS << " repeats\n\n";
-    std::cout << "areEqual (ULP, this lib): " << t_fast << " ms\n";
-    std::cout << "areEqualRelative:         " << t_rel  << " ms\n";
-    std::cout << "fabs(a-b) < 1e-9:         " << t_eps  << " ms\n\n";
+    std::cout << "areEqual (ULP, this lib):       " << t_fast   << " ms\n";
+    std::cout << "areEqualStrict (ULP + sign chk): " << t_strict << " ms\n";
+    std::cout << "areEqualRelative:               " << t_rel    << " ms\n";
+    std::cout << "fabs(a-b) < 1e-9:               " << t_eps    << " ms\n\n";
 
-    std::cout << "Speedup vs areEqualRelative: " << (t_rel / t_fast) << "x\n";
-    std::cout << "Speedup vs naive epsilon:    " << (t_eps / t_fast) << "x\n";
+    std::cout << "Speedup of areEqual vs areEqualRelative: " << (t_rel / t_fast) << "x\n";
+    std::cout << "Speedup of areEqual vs naive epsilon:    " << (t_eps / t_fast) << "x\n";
+    std::cout << "Overhead of areEqualStrict vs areEqual:  " << (t_strict / t_fast) << "x\n";
 
     return 0;
 }
