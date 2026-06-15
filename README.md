@@ -1,20 +1,54 @@
 # fast-float-compare
 
-A header-only, branchless-friendly alternative to epsilon-based floating
-point equality comparison for C++, based on the **ordered-integer property**
-of the IEEE 754 bit layout.
+Header-only, branchless-friendly utilities for comparing and ordering
+IEEE 754 `double`/`float` values via their bit patterns, instead of
+epsilon-based heuristics.
+
+Two related but distinct tools:
+
+- **`areEqual`** — "are these the same value, up to 1 ULP of rounding?"
+  A fast alternative to `fabs(a-b) <= epsilon * max(|a|,|b|)`.
+- **`lessThan` / `compare3`** — a total order over all non-NaN floats,
+  including across signs and `+0.0`/`-0.0`, matching `operator<` exactly.
 
 ## The idea
 
 In IEEE 754, a `double` or `float` is laid out as `[sign | exponent | mantissa]`,
-with the exponent placed *above* the mantissa. For positive numbers, this
-means that if you reinterpret the 64 (or 32) bits of a float as a signed
-integer, **larger floats map to larger integers** — the bit pattern is
-order-preserving.
+with the exponent placed *above* the mantissa, and exponent/mantissa bits
+laid out identically for positive and negative numbers.
 
-A direct consequence: two floating point numbers that differ by exactly
-**1 unit in the last place (ULP)** — i.e. they are *adjacent representable
-values* — have integer representations that differ by exactly **1**.
+### Equality: areEqual
+
+`areEqual` only ever answers "equal or not equal" — it never needs to
+establish an ordering. The relevant property: for two numbers of the
+**same sign**, reinterpreting their bits as a signed integer and taking
+`|bits1 - bits2|` gives exactly the ULP distance between them. Two numbers
+that are *adjacent representable values* (differ by exactly 1 ULP) have
+integer representations that differ by exactly **1**, regardless of which
+direction "increasing magnitude" points for that sign.
+
+Two numbers of **opposite sign are unequal by definition** — except
+`+0.0 == -0.0`. This sign check is not an optional safety net; it is part
+of the algorithm. Skipping it breaks `areEqual(x, -x)` for **every nonzero
+`x`**, not just an edge case — see [Why the sign check is
+mandatory](#why-the-sign-check-is-mandatory).
+
+```cpp
+bool areEqual(double a, double b) noexcept
+{
+    int64_t bits1, bits2;
+    std::memcpy(&bits1, &a, sizeof(double));
+    std::memcpy(&bits2, &b, sizeof(double));
+
+    bool neg1 = bits1 < 0;
+    bool neg2 = bits2 < 0;
+    if (neg1 != neg2) return (a == 0) && (b == 0);
+
+    int64_t diff = bits1 - bits2;
+    if (diff < 0) diff = -diff;
+    return diff <= 1;
+}
+```
 
 This gives a comparison that is:
 
@@ -25,36 +59,57 @@ This gives a comparison that is:
 - **Scale-invariant by construction**: unlike `fabs(a-b) < eps`, there is no
   separate epsilon to choose for different magnitudes — the integer
   representation already encodes the exponent.
-- **Simple**: two `memcpy`s, a subtraction, and a comparison.
 
-The threshold of **1 ULP is fixed and not configurable**. This is
-deliberate: a larger threshold (2, 4, ...) would just be an arbitrary
-epsilon expressed in different units, with the same problem this library is
-meant to avoid. For example, with a threshold of 4 ULP, two numbers that are
-genuinely 4 ULP apart — the maximum the threshold allows — would be reported
-as equal, even though they are the most different two numbers can be while
-still passing. Fixing the threshold at 1 keeps the guarantee tight: "equal"
-means "the same value up to a single correct rounding step", not "within
-some chosen tolerance".
+The threshold of **1 ULP is fixed and not configurable**. A larger
+threshold (2, 4, ...) would just be an arbitrary epsilon in different
+units, with the same problem this library is meant to avoid: with a
+threshold of 4 ULP, two numbers that are genuinely 4 ULP apart — the
+maximum the threshold allows — would be reported as equal, even though
+that is the most two numbers can differ while still passing.
 
 > **Note on scope**: `areEqual` compares `double`/`float` *bit patterns* —
 > i.e. the values *after* decimal-to-binary rounding has already happened.
 > See [Scope: what "equal" means here](#scope-what-equal-means-here) for an
 > important caveat about subnormal numbers.
 
+### Ordering: lessThan and compare3
+
+IEEE 754 bit patterns, reinterpreted as **unsigned** integers, are
+order-preserving only for non-negative numbers. For negative numbers,
+increasing magnitude produces an increasing bit pattern, but increasing
+magnitude means a *decreasing* value — so the raw bit pattern is NOT a
+total order across signs.
+
+`lessThan` fixes this with the standard branchless "flip" transform
+(`to_ordered`, in `detail::`): non-negative numbers get their sign bit set;
+negative numbers get all their bits inverted. This maps the full range of
+non-NaN floats onto an unsigned integer range that is monotonic with the
+float value — including correctly merging `+0.0` and `-0.0` into a single
+ordered value (since IEEE 754 `<` treats them as equal).
+
+A direct consequence of the flip: **any positive number compares greater
+than any negative number, regardless of magnitude** — `to_ordered` places
+the entire non-negative range above the entire negative range as a first
+step, before magnitude within each range is considered. This holds even for
+extreme, counterintuitive-looking magnitude differences:
+
 ```cpp
-bool areEqual(double a, double b) noexcept
-{
-    int64_t bits1, bits2;
-    std::memcpy(&bits1, &a, sizeof(double));
-    std::memcpy(&bits2, &b, sizeof(double));
+fastcmp::lessThan(-2.0, -1.0);  // true  (within same sign: ordinary magnitude order)
+fastcmp::lessThan(-1.0, 1.0);   // true
+fastcmp::lessThan(-0.0, +0.0);  // false (they're equal under <)
 
-    int64_t diff = bits1 - bits2;
-    if (diff < 0) diff = -diff;
-
-    return diff <= 1;
-}
+fastcmp::compare3(1e-300, -1e300);  // +1  (a tiny positive is still > a huge negative)
+fastcmp::compare3(-1.0, 1.0);       // -1  (any negative < any positive)
 ```
+
+This is the same property [areEqual's mandatory sign check](#why-the-sign-check-is-mandatory)
+relies on, applied to ordering instead of equality: sign is checked
+(implicitly, via the flip) before magnitude.
+
+`compare3` is a three-way comparison built from `lessThan` and `areEqual`:
+returns `-1`, `0`, or `+1`. Note that, consistent with `areEqual`'s
+definition of "equal", `compare3` can return `0` for two values that are 1
+ULP apart but not bit-identical (same sign only).
 
 ## Usage
 
@@ -68,75 +123,105 @@ double ref = 0.3;
 
 fastcmp::areEqual(sum, ref);              // true (1 ULP apart — adjacent representable values)
 fastcmp::areEqualSafe(sum, ref);          // true, also checks for NaN
+
+fastcmp::lessThan(-1.0, 1.0);             // true
+fastcmp::lessThan(1e-300, -1e300);        // false (any positive > any negative)
+fastcmp::lessThanSafe(a, b);              // + NaN check (NaN has no position -> false)
+
+fastcmp::compare3(1.0, 2.0);              // -1
+fastcmp::compare3(-1.0, 1.0);             // -1
+fastcmp::compare3(1e-300, -1e300);        // +1 (tiny positive still beats huge negative)
+fastcmp::compare3(0.1+0.2, 0.3);          //  0  (1 ULP -> areEqual)
 ```
 
-Two entry points are provided:
+All functions have a `*Safe` variant that checks for NaN first and returns
+`false` (or, for `compare3`, the `Safe` variants don't exist — `compare3`
+is built on the non-Safe primitives; check for NaN yourself before calling
+it if needed).
 
-- `areEqual(a, b)` — fastest path. **Precondition: neither argument is
-  NaN.** Returns `true` iff `a` and `b` are bit-identical or adjacent
-  representable values (ULP distance ≤ 1). This threshold is fixed and not
-  configurable — see [The idea](#the-idea) for why.
-- `areEqualSafe(a, b)` — adds `isnan` checks (NaN != NaN, per IEEE 754).
+**Preconditions** (all functions): neither argument is NaN, unless using a
+`*Safe` variant.
 
-### areEqualStrict — fixing the denorm_min false positive
+## Why the sign check is mandatory
 
-`areEqual` has a documented false positive for opposite-sign values near
-`denorm_min()` (see [Known limitation](#known-limitation) below). If this
-matters for your application — or you simply want a drop-in replacement
-that matches `areEqualRelative`'s behavior in all cases — use
-`areEqualStrict` instead. It first compares the sign bits of `a` and `b`:
-if they differ, the numbers are equal only when both are zero (so
-`+0.0 == -0.0` still holds); otherwise it falls back to the same ULP
-comparison as `areEqual`.
+For ANY nonzero `x`, `areEqual(x, -x)` must be `false`. An implementation
+that skips the sign check gets this wrong for **every** nonzero `x`:
+`bits(x)` and `bits(-x)` differ only in the sign bit (the top bit). As
+signed integers, `bits(x) - bits(-x)` is exactly `±2^(bitwidth-1)`, which
+overflows the signed integer type and wraps around to the most negative
+representable value (`INT64_MIN` for `double`) — which then passes
+`<= 1`.
 
 ```cpp
-fastcmp::areEqualStrict(+0.0, -0.0);                    // true
-fastcmp::areEqualStrict(denorm_min, -denorm_min);       // false (areEqual gives true here)
-fastcmp::areEqualStrictSafe(a, b);                      // + NaN check
+// WITHOUT the sign check (do not do this):
+//   areEqual(1.0, -1.0)        -> incorrectly true
+//   areEqual(1e300, -1e300)    -> incorrectly true
+//   areEqual(denorm_min, -denorm_min) -> incorrectly true
+//   ... for literally every nonzero x
 ```
 
-`areEqualStrict` costs one extra branch and a handful of comparisons. As
-shown in [Performance](#performance), it remains faster than
-`areEqualRelative` while being correct across the full range of `double`
-and `float`, including the sign-crossing edge case.
+This is why the sign check is the *first step of the algorithm*, not an
+optional extra — see [The idea](#the-idea) above.
 
 ## Correctness
 
 Verified against `areEqualRelative` (the standard
-`fabs(a-b) <= epsilon * max(|a|,|b|)` approach) across:
+`fabs(a-b) <= epsilon * max(|a|,|b|)` approach) and against native
+`operator<` across:
 
 - Numbers of vastly different magnitude (`1e-311` to `1e300`)
-- Positive and negative operands
+- Positive and negative operands, including `x` vs `-x` for many `x`
+- `+0.0` / `-0.0`
 - Subnormal numbers
 - `float` and `double`
 - The classic `0.1 + 0.2 != 0.3` case
+- 200k+ random IEEE 754 bit patterns spanning the full range, including
+  subnormals and (skipped) NaNs
 
 See [`tests/test_compare.cpp`](tests/test_compare.cpp).
 
 ## Performance
 
-On a representative workload (1M random double comparisons, results
-differing by 1 ULP, `-O2`):
+On a representative workload (1M comparisons x 50 repeats, `-O2`):
 
-| Method                            | Relative speed |
-|------------------------------------|----------------|
-| `areEqual` (this library)          | **1.0x**       |
-| `areEqualRelative` (classic)       | ~0.65–0.7x     |
-| `areEqualStrict` (this library)    | ~0.65–0.7x     |
-| `fabs(a-b) < 1e-9` (naive eps)      | ~1.1–1.2x      |
+**Equality** (values ~1 ULP apart, mixed signs):
 
-`areEqual` is consistently **1.4–1.55x faster than `areEqualRelative`**.
-`areEqualStrict` adds a sign-bit check to eliminate the
-[denorm_min edge case](#known-limitation) below; on this workload its cost
-is roughly comparable to `areEqualRelative` — sometimes a bit faster,
-sometimes a bit slower, run-to-run. If the denorm_min edge case matters to
-you, `areEqualStrict` gives you `areEqualRelative`-equivalent speed while
-also being correct for `+0.0`/`-0.0` and opposite-sign comparisons.
+| Method                      | Relative speed |
+|------------------------------|----------------|
+| `areEqual` (this library)    | **1.0x**       |
+| `areEqualRelative` (classic) | ~0.95–1.05x    |
+| `fabs(a-b) < 1e-9` (naive eps)| ~1.4–1.5x      |
 
-Compared to a naive fixed-epsilon check, `areEqual` is in the same ballpark
-in raw speed — but the naive check has no scale-awareness and silently
-breaks for very large or very small magnitudes, whereas the ULP-based
-threshold has the same meaning at every scale.
+`areEqual` is roughly on par with `areEqualRelative` — slightly faster in
+most runs. This is the honest cost of doing the sign check correctly: an
+earlier version of this library skipped it and measured faster, but was
+incorrect for every `x` vs `-x` pair (see [Why the sign check is
+mandatory](#why-the-sign-check-is-mandatory)). `areEqual` remains
+preferable to `areEqualRelative` because its threshold has a fixed,
+physically-motivated meaning at every scale, whereas
+`areEqualRelative`'s epsilon must be chosen by the caller.
+
+**Ordering** (independent random values, mixed signs):
+
+| Method                          | Relative speed |
+|-----------------------------------|----------------|
+| `operator<` (native)              | **1.0x**       |
+| `lessThan` (this library)         | ~2.0–2.5x      |
+| three-way via `< `/`>` (native)    | ~1.0x (baseline for compare3) |
+| `compare3` (this library)         | ~1.2–1.3x      |
+
+`lessThan` costs roughly 2–2.5x a native `<` (a single `comisd`
+instruction vs. ~20 integer instructions, fully branchless — verified in
+generated assembly). `compare3` is closer to native, at ~1.2–1.3x, because
+`areEqual`'s 1-ULP tolerance occasionally short-circuits to "equal" where a
+strict `<`/`>` chain would need both comparisons.
+
+Use `lessThan`/`compare3` when you need a **total order** that handles
+sign-crossing and `±0.0` correctly in generic/templated code (e.g. as a
+comparator for `std::sort` over values that may include negative numbers
+and zeros and must match `operator<` semantics exactly) — not as a
+general replacement for `operator<` on values you already know are
+same-signed.
 
 Run the benchmark yourself:
 
@@ -145,33 +230,13 @@ g++ -O2 -std=c++17 -o benchmark benchmark/benchmark.cpp
 ./benchmark
 ```
 
-## Known limitation
-
-The signed-integer subtraction can overflow when `a` and `b` have
-**opposite signs and both lie extremely close to the smallest subnormal
-magnitude** (`std::numeric_limits<T>::denorm_min()`, i.e. around `±5e-324`
-for `double`). In that case `bits(a) - bits(b)` exceeds `INT64_MAX` by
-exactly 1, wraps around to `INT64_MIN`, and the comparison
-`diff <= 1` then evaluates to `true` — i.e. **`areEqual` reports two
-numbers of opposite sign as equal**, a false positive.
-
-This is an exceedingly narrow edge case (it only affects values whose
-magnitude is within one or two ULPs of `denorm_min()`) that does not arise
-in ordinary numerical computation. `areEqual` does not special-case it; if
-your application may produce values in that exact regime, use
-`areEqualStrict` instead.
-
-NaN and infinities are handled correctly by `areEqualSafe`. `areEqual` itself
-assumes non-NaN input (this is the documented precondition, matching the
-common pattern of checking for NaN once, upstream, before a series of
-comparisons).
-
 ## Scope: what "equal" means here
 
 `areEqual` answers a precise question: **are these two `double` (or `float`)
-values bit-identical, or adjacent representable values?** It does *not* — and
-cannot — answer a different question that is easy to conflate with it: *are
-the decimal numbers I wrote in my source code the same?*
+values bit-identical, or adjacent representable values (same sign)?** It
+does *not* — and cannot — answer a different question that is easy to
+conflate with it: *are the decimal numbers I wrote in my source code the
+same?*
 
 Every decimal literal in a C++ program is rounded to the nearest
 representable `double` at compile time (the "Level 1 → Level 2" conversion
@@ -193,15 +258,12 @@ double x2 = 1.23456789098787441868238613483e-311;
 //   areEqual(x1, x2) == true
 ```
 
-This is not a bug in `areEqual`, and not the same issue as the
-[denorm_min false positive](#known-limitation) above (that one is about a
-sign-crossing integer overflow; this one is about decimal-to-binary rounding
-that happens *before* `areEqual` ever sees the values). It is a fundamental
-property of `double` as a storage format: in the subnormal region, the
-decimal-to-binary rounding step can be lossy enough to map distinguishable
-decimal inputs onto an identical bit pattern, and no comparison performed
-*after* that rounding — `areEqual`, `areEqualRelative`, ULP-based or
-epsilon-based — can recover the information that was already lost.
+This is a fundamental property of `double` as a storage format: in the
+subnormal region, the decimal-to-binary rounding step can be lossy enough
+to map distinguishable decimal inputs onto an identical bit pattern, and no
+comparison performed *after* that rounding — `areEqual`, `areEqualRelative`,
+ULP-based or epsilon-based — can recover the information that was already
+lost.
 
 If your application's correctness depends on distinguishing decimal inputs
 at that scale, the comparison needs to happen on the decimal values
