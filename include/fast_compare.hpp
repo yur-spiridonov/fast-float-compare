@@ -10,7 +10,6 @@
 
 #include <cstdint>
 #include <cstring>
-#include <cmath>
 
 namespace fastcmp {
 
@@ -144,8 +143,7 @@ inline UInt to_ordered(Float x) noexcept
 // is meant to avoid: it can declare numbers equal that are, in fact, the
 // most they could possibly differ given that threshold.
 //
-// PRECONDITION: neither `a` nor `b` is NaN. Use areEqualSafe if NaN is
-// possible.
+// PRECONDITION: neither `a` nor `b` is NaN.
 // ---------------------------------------------------------------------
 
 inline bool areEqual(double a, double b) noexcept
@@ -156,26 +154,6 @@ inline bool areEqual(double a, double b) noexcept
 inline bool areEqual(float a, float b) noexcept
 {
     return detail::ulp_equal<float, int32_t>(a, b);
-}
-
-// ---------------------------------------------------------------------
-// areEqualSafe
-//
-// Same as areEqual, but additionally checks for NaN inputs and returns
-// false if either argument is NaN (matching IEEE 754 semantics, where
-// NaN != NaN). Slightly slower due to the isnan() checks.
-// ---------------------------------------------------------------------
-
-inline bool areEqualSafe(double a, double b) noexcept
-{
-    if (std::isnan(a) || std::isnan(b)) return false;
-    return areEqual(a, b);
-}
-
-inline bool areEqualSafe(float a, float b) noexcept
-{
-    if (std::isnan(a) || std::isnan(b)) return false;
-    return areEqual(a, b);
 }
 
 // ---------------------------------------------------------------------
@@ -200,7 +178,7 @@ inline bool areEqualSafe(float a, float b) noexcept
 // patterns order them, or they don't.
 //
 // PRECONDITION: neither `a` nor `b` is NaN. NaN has no defined position in
-// this ordering; use lessThanSafe if NaN is possible.
+// this ordering.
 // ---------------------------------------------------------------------
 
 inline bool lessThan(double a, double b) noexcept
@@ -213,18 +191,6 @@ inline bool lessThan(float a, float b) noexcept
 {
     return detail::to_ordered<float, int32_t, uint32_t>(a)
          < detail::to_ordered<float, int32_t, uint32_t>(b);
-}
-
-inline bool lessThanSafe(double a, double b) noexcept
-{
-    if (std::isnan(a) || std::isnan(b)) return false;
-    return lessThan(a, b);
-}
-
-inline bool lessThanSafe(float a, float b) noexcept
-{
-    if (std::isnan(a) || std::isnan(b)) return false;
-    return lessThan(a, b);
 }
 
 // ---------------------------------------------------------------------
