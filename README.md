@@ -9,7 +9,14 @@ Two related but distinct tools:
 - **`areEqual`** — "are these the same value, up to 1 ULP of rounding?"
   A fast alternative to `fabs(a-b) <= epsilon * max(|a|,|b|)`.
 - **`lessThan` / `compare3`** — a total order over all non-NaN floats,
-  including across signs and `+0.0`/`-0.0`, matching `operator<` exactly.
+  including across signs and `+0.0`/`-0.0`, following IEEE 754's
+  `totalOrder` predicate.
+
+Both tools share the same underlying view: a float's sign always takes
+priority over its magnitude. `+0.0` and `-0.0` are treated as distinct,
+infinitesimally-signed values rather than as "the number zero with no
+sign" — consistent with IEEE 754's `totalOrder`, where `-0.0 < +0.0`
+strictly.
 
 ## The idea
 
@@ -27,11 +34,17 @@ that are *adjacent representable values* (differ by exactly 1 ULP) have
 integer representations that differ by exactly **1**, regardless of which
 direction "increasing magnitude" points for that sign.
 
-Two numbers of **opposite sign are unequal by definition** — except
-`+0.0 == -0.0`. This sign check is not an optional safety net; it is part
-of the algorithm. Skipping it breaks `areEqual(x, -x)` for **every nonzero
-`x`**, not just an edge case — see [Why the sign check is
-mandatory](#why-the-sign-check-is-mandatory).
+Two numbers of **opposite sign are unequal, always** — including
+`+0.0` vs `-0.0`. This sign check is not an optional safety net; it is part
+of the algorithm, for two reasons:
+
+1. **Correctness for nonzero values**: skipping it breaks `areEqual(x, -x)`
+   for **every nonzero `x`**, not just an edge case — see [Why the sign
+   check is mandatory](#why-the-sign-check-is-mandatory).
+2. **Consistency with `lessThan`/`compare3`**: `lessThan(-0.0,+0.0)` is
+   `true` (`-0.0 < +0.0` under `totalOrder`). If `areEqual(-0.0,+0.0)` were
+   also `true`, `compare3` would return `0` for a pair it also reports as
+   `a < b` — a three-way comparison cannot do both.
 
 ```cpp
 bool areEqual(double a, double b) noexcept
@@ -42,7 +55,7 @@ bool areEqual(double a, double b) noexcept
 
     bool neg1 = bits1 < 0;
     bool neg2 = bits2 < 0;
-    if (neg1 != neg2) return (a == 0) && (b == 0);
+    if (neg1 != neg2) return false;  // different signs: never equal
 
     int64_t diff = bits1 - bits2;
     if (diff < 0) diff = -diff;
@@ -84,8 +97,7 @@ total order across signs.
 (`to_ordered`, in `detail::`): non-negative numbers get their sign bit set;
 negative numbers get all their bits inverted. This maps the full range of
 non-NaN floats onto an unsigned integer range that is monotonic with the
-float value — including correctly merging `+0.0` and `-0.0` into a single
-ordered value (since IEEE 754 `<` treats them as equal).
+float value.
 
 A direct consequence of the flip: **any positive number compares greater
 than any negative number, regardless of magnitude** — `to_ordered` places
@@ -96,15 +108,26 @@ extreme, counterintuitive-looking magnitude differences:
 ```cpp
 fastcmp::lessThan(-2.0, -1.0);  // true  (within same sign: ordinary magnitude order)
 fastcmp::lessThan(-1.0, 1.0);   // true
-fastcmp::lessThan(-0.0, +0.0);  // false (they're equal under <)
+fastcmp::lessThan(-0.0, +0.0);  // true  (-0.0 < +0.0 under totalOrder)
 
 fastcmp::compare3(1e-300, -1e300);  // +1  (a tiny positive is still > a huge negative)
 fastcmp::compare3(-1.0, 1.0);       // -1  (any negative < any positive)
+fastcmp::compare3(-0.0, +0.0);      // -1  (-0.0 < +0.0; see areEqual above)
 ```
 
-This is the same property [areEqual's mandatory sign check](#why-the-sign-check-is-mandatory)
-relies on, applied to ordering instead of equality: sign is checked
-(implicitly, via the flip) before magnitude.
+Because `+0.0` and `-0.0` differ only in their sign bit — the same bit that
+orders every other positive/negative pair — no special case is needed for
+them: "any positive orders above any negative" already implies
+`+0.0 > -0.0`, treating both zeros as infinitesimals of their respective
+sign. This is the same property [areEqual's mandatory sign
+check](#why-the-sign-check-is-mandatory) relies on, applied to ordering
+instead of equality: sign is checked (implicitly, via the flip / via the
+`neg1 != neg2` branch) before magnitude.
+
+**The one place `lessThan` differs from `operator<`:** IEEE 754's `<`
+treats `+0.0` and `-0.0` as equal (`-0.0 < 0.0` is `false`), but
+`lessThan(-0.0, +0.0)` is `true`. This is intentional — see above — and is
+the only pair of non-NaN values where `lessThan(a,b) != (a < b)`.
 
 `compare3` is a three-way comparison built from `lessThan` and `areEqual`:
 returns `-1`, `0`, or `+1`. Note that, consistent with `areEqual`'s
@@ -122,25 +145,22 @@ double sum = 0.1 + 0.2;
 double ref = 0.3;
 
 fastcmp::areEqual(sum, ref);              // true (1 ULP apart — adjacent representable values)
-fastcmp::areEqualSafe(sum, ref);          // true, also checks for NaN
 
 fastcmp::lessThan(-1.0, 1.0);             // true
 fastcmp::lessThan(1e-300, -1e300);        // false (any positive > any negative)
-fastcmp::lessThanSafe(a, b);              // + NaN check (NaN has no position -> false)
+fastcmp::lessThan(-0.0, +0.0);            // true  (-0.0 < +0.0 under totalOrder)
 
 fastcmp::compare3(1.0, 2.0);              // -1
 fastcmp::compare3(-1.0, 1.0);             // -1
 fastcmp::compare3(1e-300, -1e300);        // +1 (tiny positive still beats huge negative)
 fastcmp::compare3(0.1+0.2, 0.3);          //  0  (1 ULP -> areEqual)
+fastcmp::compare3(-0.0, +0.0);            // -1
 ```
 
-All functions have a `*Safe` variant that checks for NaN first and returns
-`false` (or, for `compare3`, the `Safe` variants don't exist — `compare3`
-is built on the non-Safe primitives; check for NaN yourself before calling
-it if needed).
-
-**Preconditions** (all functions): neither argument is NaN, unless using a
-`*Safe` variant.
+**Precondition** (all functions): neither argument is NaN. None of these
+functions check for NaN at runtime — callers are expected to ensure inputs
+are valid numbers before calling, consistent with this library's focus on
+the comparison itself rather than input validation.
 
 ## Why the sign check is mandatory
 
@@ -161,7 +181,10 @@ representable value (`INT64_MIN` for `double`) — which then passes
 ```
 
 This is why the sign check is the *first step of the algorithm*, not an
-optional extra — see [The idea](#the-idea) above.
+optional extra — see [The idea](#the-idea) above. The check is a single
+`if (neg1 != neg2) return false;` — cheaper than the special-cased
+`+0.0 == -0.0` check an earlier version of this library had, and (as
+explained above) more correct too.
 
 ## Correctness
 
@@ -171,7 +194,7 @@ Verified against `areEqualRelative` (the standard
 
 - Numbers of vastly different magnitude (`1e-311` to `1e300`)
 - Positive and negative operands, including `x` vs `-x` for many `x`
-- `+0.0` / `-0.0`
+- `+0.0` / `-0.0`, including their (intentional) divergence from `<`
 - Subnormal numbers
 - `float` and `double`
 - The classic `0.1 + 0.2 != 0.3` case
@@ -182,51 +205,54 @@ See [`tests/test_compare.cpp`](tests/test_compare.cpp).
 
 ## Performance
 
-On a representative workload (1M comparisons x 50 repeats, `-O2`):
+Measured in **CPU cycles per call** via `__rdtsc` with `lfence`
+serialization, taking the median of 50 trials over 100k elements each
+(median-of-medians is far more stable than wall-clock timing in a
+shared/virtualized environment, where wall-clock measurements of these
+functions can vary 2-3x between runs purely from competing processes).
+`-O2 -march=native`.
 
 **Equality** (values ~1 ULP apart, mixed signs):
 
-| Method                      | Relative speed |
-|------------------------------|----------------|
-| `areEqual` (this library)    | **1.0x**       |
-| `areEqualRelative` (classic) | ~0.95–1.05x    |
-| `fabs(a-b) < 1e-9` (naive eps)| ~1.4–1.5x      |
+| Method                      | Cycles/call | Relative to areEqual |
+|------------------------------|-------------|------------------------|
+| `areEqual` (this library)    | **~1.95**   | 1.0x                   |
+| `areEqualRelative` (classic) | ~2.27       | ~1.16x                 |
+| `fabs(a-b) < 1e-9` (naive eps)| ~1.48       | ~0.76x                 |
 
-`areEqual` is roughly on par with `areEqualRelative` — slightly faster in
-most runs. This is the honest cost of doing the sign check correctly: an
-earlier version of this library skipped it and measured faster, but was
-incorrect for every `x` vs `-x` pair (see [Why the sign check is
-mandatory](#why-the-sign-check-is-mandatory)). `areEqual` remains
-preferable to `areEqualRelative` because its threshold has a fixed,
-physically-motivated meaning at every scale, whereas
-`areEqualRelative`'s epsilon must be chosen by the caller.
+`areEqual` is consistently **~15-20% faster than `areEqualRelative`**, on
+top of having a fixed, physically-motivated threshold instead of a
+caller-chosen epsilon. The naive fixed-epsilon check is faster still in raw
+cycles, but doesn't scale: it silently breaks for magnitudes where `1e-9`
+isn't an appropriate absolute threshold.
 
 **Ordering** (independent random values, mixed signs):
 
-| Method                          | Relative speed |
-|-----------------------------------|----------------|
-| `operator<` (native)              | **1.0x**       |
-| `lessThan` (this library)         | ~2.0–2.5x      |
-| three-way via `< `/`>` (native)    | ~1.0x (baseline for compare3) |
-| `compare3` (this library)         | ~1.2–1.3x      |
+| Method                          | Cycles/call | Relative to native |
+|-----------------------------------|-------------|----------------------|
+| `operator<` (native)              | **~1.50**   | 1.0x                 |
+| `lessThan` (this library)         | ~1.95       | ~1.3x                |
+| three-way via `<`/`>` (native)     | ~11.8       | 1.0x (baseline for compare3) |
+| `compare3` (this library)          | ~11.8       | ~1.0x                |
 
-`lessThan` costs roughly 2–2.5x a native `<` (a single `comisd`
-instruction vs. ~20 integer instructions, fully branchless — verified in
-generated assembly). `compare3` is closer to native, at ~1.2–1.3x, because
-`areEqual`'s 1-ULP tolerance occasionally short-circuits to "equal" where a
-strict `<`/`>` chain would need both comparisons.
+`lessThan` costs about 0.4-0.5 cycles over a native `<` (a single `comisd`
+instruction vs. ~13 integer instructions, fully branchless — verified in
+generated assembly: `sar`/`or`/`xor` ×2 plus a final `cmp`/`setb`, zero
+jumps). `compare3` is essentially free relative to a native `<`/`>`
+three-way chain — both cost ~11.8 cycles, dominated by the inherent cost of
+producing a three-valued result rather than by either implementation.
 
 Use `lessThan`/`compare3` when you need a **total order** that handles
-sign-crossing and `±0.0` correctly in generic/templated code (e.g. as a
-comparator for `std::sort` over values that may include negative numbers
-and zeros and must match `operator<` semantics exactly) — not as a
-general replacement for `operator<` on values you already know are
-same-signed.
+sign-crossing correctly in generic/templated code (e.g. as a comparator for
+`std::sort`) and where the `-0.0`/`+0.0` divergence from `<` (see
+[Ordering](#ordering-lessthan-and-compare3) above) is acceptable or
+desired — not as a general drop-in replacement for `operator<` on values
+you already know are same-signed and where `±0.0` must compare equal.
 
-Run the benchmark yourself:
+Run the benchmark yourself (x86/x64 only, uses `__rdtsc`):
 
 ```bash
-g++ -O2 -std=c++17 -o benchmark benchmark/benchmark.cpp
+g++ -O2 -std=c++17 -march=native -o benchmark benchmark/benchmark.cpp
 ./benchmark
 ```
 
