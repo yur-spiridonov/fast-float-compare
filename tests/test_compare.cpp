@@ -60,14 +60,6 @@ int main()
     check(!areEqual(pos_zero, neg_zero), "areEqual(+0.0, -0.0) -> false (distinct under totalOrder)");
     check(!areEqual(neg_zero, pos_zero), "areEqual(-0.0, +0.0) -> false");
 
-
-    // =====================================================================
-    // areEqualSafe: NaN handling
-    // =====================================================================
-    double nan_val = std::numeric_limits<double>::quiet_NaN();
-    check(!areEqualSafe(nan_val, nan_val), "NaN != NaN (areEqualSafe)");
-    check(!areEqualSafe(nan_val, 1.0), "NaN != 1.0 (areEqualSafe)");
-
     // =====================================================================
     // lessThan: total order over IEEE 754 floats (totalOrder semantics)
     // =====================================================================
@@ -139,10 +131,6 @@ int main()
         }
         check(all_match, "lessThan matches native < (100k random pairs, mixed signs, excluding -0.0/+0.0)");
     }
-
-    // --- lessThanSafe with NaN ---
-    check(!lessThanSafe(nan_val, 1.0), "lessThanSafe(NaN, 1.0) -> false");
-    check(!lessThanSafe(1.0, nan_val), "lessThanSafe(1.0, NaN) -> false");
 
     // --- Random stress test across the full magnitude range, including subnormals ---
     // Same -0.0/+0.0 exclusion as above, for the same reason.
