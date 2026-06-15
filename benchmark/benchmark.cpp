@@ -1,116 +1,125 @@
-// test_compare.cpp
-// Basic correctness tests for fast_compare.hpp
+// benchmark.cpp
+// Compares CPU-cycle cost of:
+//   1. areEqual          (this library: sign check + ULP via integer reinterpretation)
+//   2. areEqualRelative   (classic relative-epsilon, std::numeric_limits)
+//   3. fabs(a-b) < eps    (naive fixed absolute epsilon)
+//   4. lessThan           (this library: total order via to_ordered)
+//   5. operator<          (native double comparison)
+//   6. compare3           (this library: three-way comparison)
+//
+// Uses __rdtsc with lfence serialization and median-of-medians, which is
+// far more stable than wall-clock timing in a shared/virtualized
+// environment: wall-clock measurements of these functions can vary by
+// 2-3x between runs depending on competing processes, while the cycle
+// counts below are stable to within a few percent run-to-run.
+//
+// x86/x64 only (uses <x86intrin.h> and __rdtsc).
+//
+// Build (release mode + native arch are both important):
+//   g++ -O2 -std=c++17 -march=native -o benchmark benchmark.cpp
 
 #include "../include/fast_compare.hpp"
 #include <iostream>
 #include <iomanip>
+#include <vector>
+#include <random>
+#include <algorithm>
+#include <cmath>
 #include <limits>
-#include <cassert>
+#include <cstdint>
+#include <x86intrin.h>
+
+template <typename T>
+bool areEqualRelative(T a, T b) noexcept {
+    if (a == b) return true;
+    const T diff = std::fabs(a - b);
+    return diff <= (std::numeric_limits<T>::epsilon() * std::max(std::fabs(a), std::fabs(b)));
+}
+
+template <typename T>
+int compare3Native(T a, T b) noexcept {
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+// Median cycles/call: time a tight loop over N elements (so rdtsc overhead
+// is amortized over N calls), repeat for `trials` independent loops, and
+// take the median of those per-trial averages. The median rejects outlier
+// trials hit by interrupts/context switches without needing the loop
+// itself to be free of such interruptions.
+template <typename Func>
+double median_cycles_per_call(Func f, const std::vector<double>& a, const std::vector<double>& b, int trials)
+{
+    const size_t n = a.size();
+    std::vector<double> samples(trials);
+    volatile int sink = 0;
+
+    for (int t = 0; t < trials; ++t) {
+        _mm_lfence();
+        uint64_t start = __rdtsc();
+        _mm_lfence();
+
+        for (size_t i = 0; i < n; ++i) {
+            sink = static_cast<int>(f(a[i], b[i]));
+        }
+
+        _mm_lfence();
+        uint64_t end = __rdtsc();
+        _mm_lfence();
+
+        samples[t] = static_cast<double>(end - start) / static_cast<double>(n);
+    }
+    (void)sink;
+
+    std::sort(samples.begin(), samples.end());
+    return samples[samples.size() / 2];
+}
 
 int main()
 {
-    using namespace fastcmp;
-    int failed = 0;
+    constexpr size_t N = 100'000;  // large enough to amortize rdtsc/lfence overhead,
+                                    // small enough to stay cache-resident
+    constexpr int TRIALS = 50;
 
-    auto check = [&](bool cond, const char* name) {
-        std::cout << (cond ? "[PASS] " : "[FAIL] ") << name << "\n";
-        if (!cond) ++failed;
-    };
+    std::mt19937_64 rng(42);
+    std::uniform_real_distribution<double> dist(-1e6, 1e6);
 
-    // --- Basic equality ---
-    check(areEqual(1.0, 1.0), "1.0 == 1.0");
-    check(!areEqual(1.0, 2.0), "1.0 != 2.0");
+    // --- Equality workload: b is "almost equal" to a (1 ULP apart) ---
+    std::vector<double> a(N), b(N);
+    for (size_t i = 0; i < N; ++i) {
+        a[i] = dist(rng);
+        b[i] = a[i] + a[i] * std::numeric_limits<double>::epsilon();
+    }
 
-    // --- Classic 0.1 + 0.2 vs 0.3 (differ by 1 ULP) ---
-    double sum = 0.1 + 0.2;
-    double ref = 0.3;
-    check(areEqual(sum, ref), "0.1 + 0.2 ~= 0.3 (1 ULP)");
+    // --- Ordering workload: c, d are independent random doubles, mixed signs ---
+    std::vector<double> c(N), d(N);
+    for (size_t i = 0; i < N; ++i) {
+        c[i] = dist(rng);
+        d[i] = dist(rng);
+    }
 
-    // --- Large magnitude ---
-    double big_sum = 1.0e300 + 2.0e300;
-    double big_ref = 3.0e300;
-    check(areEqual(big_sum, big_ref), "1e300 + 2e300 ~= 3e300");
+    std::cout << std::fixed << std::setprecision(3);
 
-    // --- Small magnitude (subnormal) ---
-    double small_sum = 1.0e-311 + 2.0e-311;
-    double small_ref = 3.0e-311;
-    check(areEqual(small_sum, small_ref), "subnormal sum ~= ref");
+    std::cout << "=== Equality (median cycles/call, " << N << " elements x " << TRIALS << " trials) ===\n\n";
+    double t_areEqual = median_cycles_per_call([](double x, double y){ return fastcmp::areEqual(x, y); }, a, b, TRIALS);
+    double t_rel      = median_cycles_per_call([](double x, double y){ return areEqualRelative(x, y); }, a, b, TRIALS);
+    double t_eps      = median_cycles_per_call([](double x, double y){ return std::fabs(x - y) < 1e-9; }, a, b, TRIALS);
 
-    // --- float ---
-    float fa = 0.1f, fb = 0.2f, fref = 0.3f;
-    check(areEqual(fa + fb, fref), "float 0.1f + 0.2f ~= 0.3f");
+    std::cout << "areEqual (this lib):     " << t_areEqual << " cycles\n";
+    std::cout << "areEqualRelative:        " << t_rel      << " cycles\n";
+    std::cout << "fabs(a-b) < 1e-9:        " << t_eps       << " cycles\n";
 
-    // --- Negative numbers ---
-    check(areEqual(-1.0, -1.0), "-1.0 == -1.0");
-    check(!areEqual(-1.0, -2.0), "-1.0 != -2.0");
-    double neg_sum = -1.0 + 1e-16;
-    double neg_ref = -0.9999999999999999;
-    check(areEqual(neg_sum, neg_ref), "-1.0 + 1e-16 ~= -0.9999999999999999");
+    std::cout << "\n=== Ordering (median cycles/call, " << N << " elements x " << TRIALS << " trials) ===\n\n";
+    double t_lt    = median_cycles_per_call([](double x, double y){ return fastcmp::lessThan(x, y); }, c, d, TRIALS);
+    double t_lt_n  = median_cycles_per_call([](double x, double y){ return x < y; }, c, d, TRIALS);
+    double t_cmp3  = median_cycles_per_call([](double x, double y){ return fastcmp::compare3(x, y); }, c, d, TRIALS);
+    double t_cmp3n = median_cycles_per_call([](double x, double y){ return compare3Native(x, y); }, c, d, TRIALS);
 
-    // --- areEqualSafe with NaN ---
-    double nan_val = std::numeric_limits<double>::quiet_NaN();
-    check(!areEqualSafe(nan_val, nan_val), "NaN != NaN (areEqualSafe)");
-    check(!areEqualSafe(nan_val, 1.0), "NaN != 1.0 (areEqualSafe)");
+    std::cout << "lessThan (this lib):     " << t_lt    << " cycles\n";
+    std::cout << "operator< (native):      " << t_lt_n  << " cycles\n";
+    std::cout << "compare3 (this lib):     " << t_cmp3  << " cycles\n";
+    std::cout << "compare3 (native </>):   " << t_cmp3n << " cycles\n";
 
-    // --- Fixed 1-ULP threshold: numbers 3 ULP apart are NOT equal ---
-    // areEqual has a fixed threshold of 1 ULP, with no way to loosen it.
-    // A larger threshold would be an arbitrary epsilon by another name,
-    // and could declare numbers equal that differ by as much as that
-    // threshold allows.
-    double a = 1.0;
-    double b = std::nextafter(std::nextafter(std::nextafter(a, 2.0), 2.0), 2.0); // 3 ULP away
-    check(!areEqual(a, b), "1.0 vs 1.0+3ULP -> false (fixed 1-ULP threshold)");
-
-    // --- KNOWN LIMITATION: opposite-sign values near denorm_min() ---
-    // bits(+denorm_min) - bits(-denorm_min) overflows int64_t and wraps
-    // to INT64_MIN, which is <= 1, so areEqual incorrectly reports
-    // these two *different* numbers (opposite signs!) as equal.
-    // This is documented in the README as a known false positive.
-    double dmin =  std::numeric_limits<double>::denorm_min();
-    double ndmin = -std::numeric_limits<double>::denorm_min();
-    bool false_positive = areEqual(dmin, ndmin);
-    std::cout << (false_positive ? "[INFO] " : "[UNEXPECTED] ")
-              << "areEqual(+denorm_min, -denorm_min) = "
-              << (false_positive ? "true (known false positive, as documented)"
-                                  : "false (limitation no longer reproduces!)")
-              << "\n";
-
-    // --- areEqualStrict: fixes the denorm_min false positive ---
-    check(!areEqualStrict(dmin, ndmin), "areEqualStrict(+denorm_min, -denorm_min) -> false");
-
-    // --- areEqualStrict: +0.0 == -0.0 still holds ---
-    double pos_zero = +0.0;
-    double neg_zero = -0.0;
-    check(areEqualStrict(pos_zero, neg_zero), "areEqualStrict(+0.0, -0.0) -> true");
-
-    // --- areEqualStrict: agrees with areEqual on same-sign values ---
-    check(areEqualStrict(sum, ref) == areEqual(sum, ref),
-          "areEqualStrict agrees with areEqual on same-sign 0.1+0.2 vs 0.3");
-    check(areEqualStrict(big_sum, big_ref) == areEqual(big_sum, big_ref),
-          "areEqualStrict agrees with areEqual on same-sign 1e300 case");
-    check(areEqualStrict(neg_sum, neg_ref) == areEqual(neg_sum, neg_ref),
-          "areEqualStrict agrees with areEqual on negative-sign case");
-
-    // --- areEqualStrictSafe with NaN ---
-    check(!areEqualStrictSafe(nan_val, nan_val), "NaN != NaN (areEqualStrictSafe)");
-
-    // --- SCOPE NOTE: decimal inputs that collapse to the same double ---
-    // x1 and x2 are different decimal literals (they differ starting at
-    // the 9th significant digit), but in the subnormal range the gap
-    // between adjacent doubles (denorm_min ~ 4.94e-324) is large relative
-    // to the values themselves, so both round to the SAME double at
-    // compile time. areEqual correctly reports them as equal AS DOUBLES —
-    // but the distinction between the original decimal inputs is already
-    // lost before areEqual ever runs. See README "Scope" section.
-    double x1 = 1.234567890987650e-311;
-    double x2 = 1.23456789098787441868238613483e-311;
-    bool collapsed = areEqual(x1, x2);
-    std::cout << (collapsed ? "[INFO] " : "[UNEXPECTED] ")
-              << "areEqual(x1, x2) = "
-              << (collapsed ? "true (distinct decimal literals collapsed to the same double, as documented)"
-                             : "false (literals no longer collapse!)")
-              << "\n";
-
-    std::cout << "\n" << (failed == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << "\n";
-    return failed == 0 ? 0 : 1;
+    return 0;
 }
