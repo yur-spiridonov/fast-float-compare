@@ -90,7 +90,7 @@ Header-only — just copy `include/fast_compare.hpp` into your project.
 double sum = 0.1 + 0.2;
 double ref = 0.3;
 
-fastcmp::areEqual(sum, ref);   // true (1 ULP apart — adjacent representable values)
+fastcmp::areEqual(sum, ref);   // true (differ by at most 1 ULP — adjacent representable values)
 fastcmp::areEqual(1.0, -1.0);  // false (different signs)
 fastcmp::areEqual(+0.0, -0.0); // false (different signs, no exception for zero)
 ```
@@ -163,15 +163,13 @@ functions can vary 2-3x between runs purely from competing processes).
 | `areEqualRelative` (classic) | ~3.3        |
 
 In practice the two cost about the same — `areEqual` is marginally faster
-(within ~1%) in repeated runs, not the decisive win this library
-originally claimed in an earlier, less careful round of benchmarking. The
-case for `areEqual` over `areEqualRelative` rests primarily on its fixed,
-physically-motivated threshold (1 ULP, with a documented reason that
-threshold and no other is correct) rather than on raw speed: with
-`areEqualRelative`, the caller must choose an epsilon, and that choice is
-itself a source of bugs (too tight and rounding noise causes false
-negatives; too loose and the comparison silently accepts larger errors
-than intended).
+(within ~1%) in repeated runs. The case for `areEqual` over
+`areEqualRelative` rests primarily on its fixed, physically-motivated
+threshold (1 ULP, with a documented reason that threshold and no other is
+correct) rather than on raw speed: with `areEqualRelative`, the caller
+must choose an epsilon, and that choice is itself a source of bugs (too
+tight and rounding noise causes false negatives; too loose and the
+comparison silently accepts larger errors than intended).
 
 Run the benchmark yourself (x86/x64 only, uses `__rdtsc`):
 
