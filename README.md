@@ -6,19 +6,45 @@ IEEE 754 bit layout.
 
 ## The idea
 
-In IEEE 754, a `double` or `float` is laid out as `[sign | exponent | mantissa]`.
-For two numbers of the **same sign**, reinterpreting their bits as a signed
-integer and taking `|bits1 - bits2|` gives exactly the ULP distance between
-them: two numbers that are *adjacent representable values* (differ by
-exactly 1 ULP) have integer representations that differ by exactly **1**.
+In IEEE 754, a `double` or `float` is laid out in memory as
+`[sign | exponent | mantissa]` — for `double`, 1 sign bit, 11 exponent
+bits, and 52 mantissa bits, all packed into the same 64 bits that also
+form a 64-bit integer. This means the *same* 64 bits in memory can be read
+either as a `double` or as an `int64_t`; reading them as the other type
+without changing them is sometimes called **type punning** (or bit
+reinterpretation). In C++ this is done safely with `std::memcpy`:
+
+```cpp
+double a = 1.0;
+int64_t bits1;
+std::memcpy(&bits1, &a, sizeof(double));  // bits1 now holds the same 64 bits as a,
+                                            // just read as a signed integer
+```
+
+`bits1` is simply the name this document uses for "the bits of `a`,
+reinterpreted as `int64_t`" — likewise `bits2` for a second value `b`.
+For `a = 1.0`, `bits1` works out to `4607182418800017408`; for
+`a = 1.0000000000000002` (the very next representable `double` above
+`1.0`), the same process gives `4607182418800017409` — exactly one more.
+This is not a coincidence: it is the key property this library relies on.
+
+**For two numbers of the same sign**, `bits1` and `bits2` (computed this
+way) increase or decrease together with the magnitude of the underlying
+floats, one-for-one. So taking `|bits1 - bits2|` gives exactly the number
+of representable `double` values that lie between `a` and `b` — their
+**ULP distance** ("ULP" = unit in the last place). Two numbers that are
+*adjacent representable values* (ULP distance of exactly 1) therefore have
+`bits1` and `bits2` differing by exactly **1**, as in the `1.0` example
+above.
 
 Two numbers of **opposite sign are unequal, always** — including `+0.0` vs
 `-0.0`. This sign check is not an optional safety net; it is part of the
 algorithm. Skipping it breaks `areEqual(x, -x)` for **every nonzero `x`**:
-`bits(x)` and `bits(-x)` differ only in the sign bit, so as signed
-integers their difference is exactly `±2^(bitwidth-1)`, which overflows
-the signed integer type and wraps around to a value that incorrectly
-passes `<= 1`.
+`bits1` and `bits2` for `x` and `-x` differ only in the sign bit, so their
+difference is exactly `±2^63`, which overflows the signed 64-bit integer
+type and wraps around to a value that incorrectly passes `<= 1`.
+
+Putting this together:
 
 ```cpp
 bool areEqual(double a, double b) noexcept
