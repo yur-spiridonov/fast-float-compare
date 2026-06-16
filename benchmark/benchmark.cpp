@@ -1,11 +1,9 @@
 // benchmark.cpp
-// Compares CPU-cycle cost of:
-//   1. areEqual          (this library: sign check + ULP via integer reinterpretation)
-//   2. areEqualRelative   (classic relative-epsilon, std::numeric_limits)
-//   3. fabs(a-b) < eps    (naive fixed absolute epsilon)
-//   4. lessThan           (this library: total order via to_ordered)
-//   5. operator<          (native double comparison)
-//   6. compare3           (this library: three-way comparison)
+// Compares CPU-cycle cost of two implementations of the SAME task --
+// floating point equality with a tolerance for rounding error:
+//   1. areEqual          (this library: sign check + 1-ULP integer check)
+//   2. areEqualRelative   (the standard relative-epsilon approach,
+//                          fabs(a-b) <= epsilon * max(|a|,|b|))
 //
 // Uses __rdtsc with lfence serialization and median-of-medians, which is
 // far more stable than wall-clock timing in a shared/virtualized
@@ -34,13 +32,6 @@ bool areEqualRelative(T a, T b) noexcept {
     if (a == b) return true;
     const T diff = std::fabs(a - b);
     return diff <= (std::numeric_limits<T>::epsilon() * std::max(std::fabs(a), std::fabs(b)));
-}
-
-template <typename T>
-int compare3Native(T a, T b) noexcept {
-    if (a < b) return -1;
-    if (a > b) return 1;
-    return 0;
 }
 
 // Median cycles/call: time a tight loop over N elements (so rdtsc overhead
@@ -85,41 +76,22 @@ int main()
     std::mt19937_64 rng(42);
     std::uniform_real_distribution<double> dist(-1e6, 1e6);
 
-    // --- Equality workload: b is "almost equal" to a (1 ULP apart) ---
+    // b is "almost equal" to a (1 ULP apart) -- the case both functions
+    // are meant to call "equal"
     std::vector<double> a(N), b(N);
     for (size_t i = 0; i < N; ++i) {
         a[i] = dist(rng);
         b[i] = a[i] + a[i] * std::numeric_limits<double>::epsilon();
     }
 
-    // --- Ordering workload: c, d are independent random doubles, mixed signs ---
-    std::vector<double> c(N), d(N);
-    for (size_t i = 0; i < N; ++i) {
-        c[i] = dist(rng);
-        d[i] = dist(rng);
-    }
-
     std::cout << std::fixed << std::setprecision(3);
 
-    std::cout << "=== Equality (median cycles/call, " << N << " elements x " << TRIALS << " trials) ===\n\n";
     double t_areEqual = median_cycles_per_call([](double x, double y){ return fastcmp::areEqual(x, y); }, a, b, TRIALS);
     double t_rel      = median_cycles_per_call([](double x, double y){ return areEqualRelative(x, y); }, a, b, TRIALS);
-    double t_eps      = median_cycles_per_call([](double x, double y){ return std::fabs(x - y) < 1e-9; }, a, b, TRIALS);
 
     std::cout << "areEqual (this lib):     " << t_areEqual << " cycles\n";
     std::cout << "areEqualRelative:        " << t_rel      << " cycles\n";
-    std::cout << "fabs(a-b) < 1e-9:        " << t_eps       << " cycles\n";
-
-    std::cout << "\n=== Ordering (median cycles/call, " << N << " elements x " << TRIALS << " trials) ===\n\n";
-    double t_lt    = median_cycles_per_call([](double x, double y){ return fastcmp::lessThan(x, y); }, c, d, TRIALS);
-    double t_lt_n  = median_cycles_per_call([](double x, double y){ return x < y; }, c, d, TRIALS);
-    double t_cmp3  = median_cycles_per_call([](double x, double y){ return fastcmp::compare3(x, y); }, c, d, TRIALS);
-    double t_cmp3n = median_cycles_per_call([](double x, double y){ return compare3Native(x, y); }, c, d, TRIALS);
-
-    std::cout << "lessThan (this lib):     " << t_lt    << " cycles\n";
-    std::cout << "operator< (native):      " << t_lt_n  << " cycles\n";
-    std::cout << "compare3 (this lib):     " << t_cmp3  << " cycles\n";
-    std::cout << "compare3 (native </>):   " << t_cmp3n << " cycles\n";
+    std::cout << "Ratio (rel / areEqual):  " << (t_rel / t_areEqual) << "x\n";
 
     return 0;
 }
